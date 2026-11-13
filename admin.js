@@ -5198,7 +5198,7 @@ function enviarRotaZap() {
   const opt = selMoto.options[selMoto.selectedIndex];
   const nomeMoto = opt.dataset.nome || opt.text;
   
-  // Limpa o telefone e garante o DDI 595 (Paraguai)
+  // Limpa o telefone do motoboy e garante o DDI 595 (Paraguai)
   let telMoto = (opt.dataset.tel || "").replace(/\D/g, "");
   if (telMoto.length > 0) {
     if (telMoto.startsWith("0")) {
@@ -5216,12 +5216,21 @@ function enviarRotaZap() {
     try {
       const p = JSON.parse(decodeURIComponent(chk.value));
 
-      // Atualiza o status no banco
+      // Atualiza o status no banco para saiu_entrega
       supa.from("pedidos").update({ status: "saiu_entrega", motoboy_id: selMoto.value }).eq("id", p.id).then();
 
       msg += `📦 *PEDIDO #${p.uid_temporal || p.id}*\n`;
-      msg += `👤 ${p.cliente_nome || "Cliente"} | 📞 ${p.cliente_telefone || ""}\n`;
+      
+      // Link do WhatsApp do cliente (se houver telefone)
+      let telCliente = (p.cliente_telefone || "").replace(/\D/g, "");
+      if (telCliente) {
+        if (telCliente.startsWith("0")) telCliente = "595" + telCliente.substring(1);
+        msg += `👤 ${p.cliente_nome || "Cliente"} | 📞 https://wa.me/${telCliente}\n`;
+      } else {
+        msg += `👤 ${p.cliente_nome || "Cliente"}\n`;
+      }
 
+      // Itens do pedido
       if (p.itens && Array.isArray(p.itens)) {
         const _fmtItem = (b) => {
           let txt = `${b.qtd || b.q || 1}x ${b.nome || b.n || "Item"}`;
@@ -5234,13 +5243,19 @@ function enviarRotaZap() {
         msg += `📦 *Itens:* ` + p.itens.map(_fmtItem).join(" | ") + `\n`;
       }
 
+      // Endereço / Rota
       if (p.geo_lat && p.geo_lng) {
-        msg += `📍 https://www.google.com/maps/search/?api=1&query=${p.geo_lat},${p.geo_lng}\n`;
+        // Se tem GPS, usa rota exata
+        msg += `📍 Rota: https://www.google.com/maps/search/?api=1&query=${p.geo_lat},${p.geo_lng}\n`;
         coords.push(`${p.geo_lat},${p.geo_lng}`);
+      } else if (p.endereco_entrega && p.tipo_entrega === "delivery") {
+        // Se não tem GPS mas tem endereço, joga no Maps
+        msg += `📍 Maps: https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(p.endereco_entrega)}\n`;
       } else {
-        msg += `🏠 ${p.endereco_entrega || "Retirada"}\n`;
+        msg += `📍 Local: ${p.endereco_entrega || "Retirada / Balcão"}\n`;
       }
 
+      // Pagamento
       const forma = (p.forma_pagamento || "").toLowerCase();
       const totalGeral = p.total_geral || 0;
       const totalFmt = totalGeral.toLocaleString("es-PY");
@@ -5259,6 +5274,7 @@ function enviarRotaZap() {
           }
         }
       }
+      
       msg += `-----------------\n`;
       taxaTotal += (parseFloat(p.frete_motoboy) || TAXA_MOTOBOY || 0);
     } catch (e) {
@@ -5266,18 +5282,23 @@ function enviarRotaZap() {
     }
   });
 
+  // Rota geral se houver coordenadas GPS
   if (coords.length > 0) {
     const latLoja = COORD_LOJA.lat || "";
     const lngLoja = COORD_LOJA.lng || "";
-    msg += `\n🗺️ *ROTA NO MAPA:*\nhttps://www.google.com/maps/dir/${latLoja},${lngLoja}/${coords.join("/")}\n`;
+    msg += `\n🗺️ *ROTA COMPLETA:*\nhttps://www.google.com/maps/dir/${latLoja},${lngLoja}/${coords.join("/")}\n`;
   }
 
   msg += `\n🏍️ *Taxa Total: Gs ${taxaTotal.toLocaleString("es-PY")}*`;
 
-  // Se o telefone for válido, envia direto. Se não, abre a tela de seleção do WhatsApp.
-  const waUrl = telMoto ? `https://wa.me/${telMoto}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
+  // Codifica a mensagem garantindo que os emojis e caracteres especiais não quebrem
+  const msgEncode = encodeURIComponent(msg);
+  
+  // Se o motoboy tiver telefone, envia direto para ele. Se não, abre a tela para escolher.
+  const waUrl = telMoto ? `https://wa.me/${telMoto}?text=${msgEncode}` : `https://wa.me/?text=${msgEncode}`;
   window.open(waUrl, "_blank");
 
+  // Recarrega a tela depois de um tempo para atualizar os status
   setTimeout(() => {
     if (typeof carregarPedidos === "function") carregarPedidos();
     if (typeof calcularFinanceiro === "function") calcularFinanceiro();
