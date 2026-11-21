@@ -1286,6 +1286,7 @@ let _pedidosPagTotal = 0;
 let _pedidosPagFiltroAtivo = false; // true = sem filtro de data (usuário escolheu "Todos")
 
 async function carregarPedidos(silencioso = false, pagina = null) {
+  // === TRAVA DE SEGURANÇA (Para não limpar seleção) ===
   if (silencioso) {
     const selecionados = document.querySelectorAll(".check-pedido:checked");
     if (selecionados.length > 0) return;
@@ -1295,6 +1296,7 @@ async function carregarPedidos(silencioso = false, pagina = null) {
     _pedidosPaginaAtual = pagina;
   }
 
+  // 1. Som e Notificação
   const { count, error: countError } = await supa
     .from("pedidos")
     .select("id", { count: "exact", head: true })
@@ -1308,6 +1310,7 @@ async function carregarPedidos(silencioso = false, pagina = null) {
     if (typeof pararAlarme === "function") pararAlarme();
   }
 
+  // 2. AUTO-CONFIRM: pedidos saiu_entrega há mais de 4h
   try {
     const _corte4h = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
     const { data: _paraAuto } = await supa
@@ -1317,13 +1320,11 @@ async function carregarPedidos(silencioso = false, pagina = null) {
       .lt("tempo_saiu_entrega", _corte4h);
     if (_paraAuto && _paraAuto.length > 0) {
       const _ids = _paraAuto.map((p) => p.id);
-      await supa
-        .from("pedidos")
-        .update({ status: "entregue", tempo_entregue: new Date().toISOString() })
-        .in("id", _ids);
+      await supa.from("pedidos").update({ status: "entregue", tempo_entregue: new Date().toISOString() }).in("id", _ids);
     }
   } catch (e) {}
 
+  // 3. Query paginada
   const from = _pedidosPaginaAtual * _PEDIDOS_PAGE_SIZE;
   const to   = from + _PEDIDOS_PAGE_SIZE - 1;
 
@@ -1333,7 +1334,7 @@ async function carregarPedidos(silencioso = false, pagina = null) {
       "id, uid_temporal, status, tipo_entrega, cliente_nome, cliente_telefone, " +
       "endereco_entrega, total_geral, frete_motoboy, cancelamento_solicitado, " +
       "cancelamento_motivo, cancelamento_solicitado_por, created_at, " +
-      "tempo_saiu_entrega, motoboy_id, itens, forma_pagamento, obs_pagamento, geo_lat, geo_lng", // <-- COLUNAS DEVOLVIDAS AQUI
+      "tempo_saiu_entrega, motoboy_id, itens, forma_pagamento, obs_pagamento, geo_lat, geo_lng",
       { count: "exact" }
     )
     .or("status.eq.pendente,status.eq.em_preparo,status.eq.pronto_entrega,status.eq.saiu_entrega")
@@ -1343,7 +1344,7 @@ async function carregarPedidos(silencioso = false, pagina = null) {
   if (!_pedidosPagFiltroAtivo) {
     const _corte = new Date();
     _corte.setHours(0, 0, 0, 0);
-    _corte.setDate(_corte.getDate() - 2);
+    _corte.setDate(_corte.getDate() - 2); // 2 dias atrás
     query = query.gte("created_at", _corte.toISOString());
   }
 
@@ -1362,11 +1363,15 @@ async function carregarPedidos(silencioso = false, pagina = null) {
     ? `<span style="background:#e74c3c;color:white;font-size:0.7rem;padding:2px 7px;border-radius:10px;margin-left:6px;vertical-align:middle;">CANC. PENDENTE</span>`
     : "";
 
+  // 4. Renderização
   if (pedidos && pedidos.length > 0) {
     pedidos.forEach((p) => {
       let acoes = "";
       let linhaCor = "";
       let checkbox = "";
+
+      const totalSeguro = Number(p.total_geral || 0); // <-- BLINDAGEM CONTRA ERROS
+      const freteSeguro = Number(p.frete_motoboy || 0); // <-- BLINDAGEM CONTRA ERROS
 
       const btnPrint = `<button class="btn btn-sm btn-info" onclick="imprimirPedido(${p.id})" title="Imprimir"><i class="fas fa-print"></i></button>`;
       const temSolicitacaoCancelamento = p.cancelamento_solicitado;
@@ -1385,15 +1390,9 @@ async function carregarPedidos(silencioso = false, pagina = null) {
         acoes = `
           ${btnPrint}
           <button class="btn btn-success btn-sm" onclick="mudarStatus(${p.id}, 'em_preparo')"><i class="fas fa-fire"></i> Cozinha</button>
-          ${
-            _podeCancel
-              ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>`
-              : `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i> Sol. Cancelamento</button>`
-          }
+          ${_podeCancel ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>` : `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i> Solicitar Cancelamento</button>`}
         `;
-      }
-
-      if (p.status === "em_preparo") {
+      } else if (p.status === "em_preparo") {
         linhaCor = "background-color: #fff8e6;";
         const _btnCancelPreparo = _podeCancel
           ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')" title="Cancelar"><i class="fas fa-times"></i></button>`
@@ -1401,33 +1400,16 @@ async function carregarPedidos(silencioso = false, pagina = null) {
             ? `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i></button>`
             : `<span style="font-size:0.72rem;color:#e67e22;font-weight:600">⏳ Cancel. Pendente</span>`;
         acoes = `${btnPrint} <button class="btn btn-sm" style="background:#e67e22;color:#fff" onclick="mudarStatus(${p.id}, 'pronto_entrega')"><i class="fas fa-check"></i> Pronto</button> ${_btnCancelPreparo}`;
-      }
-
-            if (p.status === "saiu_entrega") {
+      } else if (p.status === "saiu_entrega") {
         linhaCor = "background-color: #ddf0ff;";
-        const jsonSeguro = encodeURIComponent(JSON.stringify(p));
-
         const _btnCancelSaiu = _podeCancel
           ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')" title="Cancelar"><i class="fas fa-times"></i></button>`
           : !temSolicitacaoCancelamento
             ? `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})" title="Solicitar cancelamento"><i class="fas fa-ban"></i> Cancelar</button>`
             : `<span style="font-size:0.72rem;color:#e67e22;font-weight:600">⏳ Cancel. Pendente</span>`;
-
-        // AQUI ESTÁ A CORREÇÃO: Adiciona a caixa de seleção para permitir reenvio
-        if (p.tipo_entrega === "delivery") {
-          checkbox = `<input type="checkbox" class="check-pedido" value="${jsonSeguro}" style="width:20px; height:20px;">`;
-        }
-
-        acoes = `
-          ${btnPrint} 
-          <button class="btn btn-success btn-sm" onclick="confirmarEntregaFuncionario(${p.id})"><i class="fas fa-check-circle"></i> Confirmar</button> 
-          <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick='enviarRotaZapIndividual("${jsonSeguro}")' title="Reenviar Zap para o Motoboy"><i class="fab fa-whatsapp"></i></button>
-          ${_btnCancelSaiu}
-        `;
+        acoes = `${btnPrint} <button class="btn btn-success btn-sm" onclick="confirmarEntregaFuncionario(${p.id})"><i class="fas fa-check-circle"></i> Confirmar</button> ${_btnCancelSaiu}`;
       } else if (p.status === "pronto_entrega") {
         linhaCor = "background-color: #d4edda;";
-        const jsonSeguro = encodeURIComponent(JSON.stringify(p));
-
         const btnCancelar = _podeCancel
           ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')" title="Cancelar"><i class="fas fa-times"></i></button>`
           : !temSolicitacaoCancelamento
@@ -1435,16 +1417,17 @@ async function carregarPedidos(silencioso = false, pagina = null) {
             : "";
 
         if (p.tipo_entrega === "delivery") {
+          const jsonSeguro = encodeURIComponent(JSON.stringify(p));
           checkbox = `<input type="checkbox" class="check-pedido" value="${jsonSeguro}" style="width:20px; height:20px;">`;
-          acoes = `${btnPrint} ${btnCancelar} <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick="avisarClientePronto(${p.id})" title="Avisar al cliente"><i class="fab fa-whatsapp"></i></button> <span style="color:#155724; font-weight:bold; font-size:0.9rem; margin-left:5px;"><i class="fas fa-motorcycle"></i> Aguardando Rota</span>`;
+          acoes = `${btnPrint} ${btnCancelar} <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick="avisarClientePronto(${p.id})"><i class="fab fa-whatsapp"></i></button> <span style="color:#155724; font-weight:bold; font-size:0.9rem; margin-left:5px;"><i class="fas fa-motorcycle"></i> Aguardando Rota</span>`;
         } else {
           const icone = p.tipo_entrega === "balcao" ? "fa-store" : "fa-hand-holding";
-          const tipo  = p.tipo_entrega === "balcao" ? "BALCÃO" : "RETIRADA";
-          checkbox = `<div style="text-align:center; color:#e67e22; font-size:1.2rem"><i class="fas ${icone}" title="${tipo}"></i></div>`;
-          acoes = `${btnPrint} ${btnCancelar} <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick="avisarClientePronto(${p.id})" title="Avisar"><i class="fab fa-whatsapp"></i></button> <button class="btn btn-success btn-sm" onclick="finalizarMesa(${p.id})">Baixar</button>`;
+          checkbox = `<div style="text-align:center; color:#e67e22; font-size:1.2rem"><i class="fas ${icone}"></i></div>`;
+          acoes = `${btnPrint} ${btnCancelar} <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick="avisarClientePronto(${p.id})"><i class="fab fa-whatsapp"></i></button> <button class="btn btn-success btn-sm" onclick="finalizarMesa(${p.id})">Baixar</button>`;
         }
       }
 
+      // Tabela Desktop
       tbody.innerHTML += `
         <tr style="${linhaCor}">
           <td style="text-align:center; vertical-align: middle;">${checkbox}</td>
@@ -1456,12 +1439,103 @@ async function carregarPedidos(silencioso = false, pagina = null) {
           </td>
           <td><span class="status-badge st-${p.status}">${p.status.toUpperCase().replace("_", " ")}</span>
           ${temSolicitacaoCancelamento && _podeCancel ? badgeCancelPendente : ""}</td>
-          <td>Gs ${(p.total_geral || 0).toLocaleString("es-PY")}</td>
+          <td>Gs ${totalSeguro.toLocaleString("es-PY")}</td>
           <td class="actions-cell">${acoes}</td>
         </tr>`;
+
+      // Cards Mobile
+      if (cardsDiv) {
+        const statusLabel =
+          p.status === "pendente"       ? "🔔 Novo"
+          : p.status === "em_preparo"    ? "🔥 Na Cozinha"
+          : p.status === "pronto_entrega"? "✅ Pronto"
+          : p.status.replace("_", " ");
+        const cardBg =
+          p.status === "pendente"        ? "#fff3cd"
+          : p.status === "pronto_entrega"? "#d4edda"
+          : p.status === "saiu_entrega"  ? "#ddf0ff"
+          : "#fff";
+        const jsonSeguro = encodeURIComponent(JSON.stringify(p));
+        let cardAcoes = "";
+
+        if (p.status === "pendente") {
+          cardAcoes = `
+            <button class="btn btn-success btn-sm" onclick="mudarStatus(${p.id}, 'em_preparo')"><i class="fas fa-fire"></i> Cozinha</button>
+            <button class="btn btn-info btn-sm" onclick="imprimirPedido(${p.id})"><i class="fas fa-print"></i> Imprimir</button>
+            ${_podeCancel ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>` : `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i> Cancelar</button>`}`;
+        } else if (p.status === "em_preparo") {
+          const _btnCancelPreparoCard = _podeCancel
+            ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>`
+            : !temSolicitacaoCancelamento
+              ? `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i> Cancelar</button>`
+              : `<span style="font-size:0.7rem;color:#e67e22;font-weight:600">⏳ Pendente</span>`;
+          cardAcoes = `
+            <button class="btn btn-sm" style="background:#e67e22;color:#fff" onclick="mudarStatus(${p.id}, 'pronto_entrega')"><i class="fas fa-check"></i> Pronto</button>
+            <button class="btn btn-info btn-sm" onclick="imprimirPedido(${p.id})"><i class="fas fa-print"></i> Imprimir</button>
+            ${_btnCancelPreparoCard}`;
+        } else if (p.status === "saiu_entrega") {
+          const _btnCancelSaiuCard = _podeCancel
+            ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>`
+            : !temSolicitacaoCancelamento
+              ? `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i> Cancelar</button>`
+              : `<span style="font-size:0.7rem;color:#e67e22;font-weight:600">⏳ Pendente</span>`;
+          cardAcoes = `
+            <button class="btn btn-success btn-sm" onclick="confirmarEntregaFuncionario(${p.id})"><i class="fas fa-check-circle"></i> Confirmar</button>
+            <button class="btn btn-info btn-sm" onclick="imprimirPedido(${p.id})"><i class="fas fa-print"></i> Imprimir</button>
+            ${_btnCancelSaiuCard}`;
+        } else if (p.status === "pronto_entrega" && p.tipo_entrega === "balcao") {
+          const _btnCancelBalcao = _podeCancel
+            ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>`
+            : !temSolicitacaoCancelamento
+              ? `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i> Cancelar</button>`
+              : "";
+          cardAcoes = `<button class="btn btn-success btn-sm" onclick="finalizarMesa(${p.id})"><i class="fas fa-check"></i> Entregar</button>
+            <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick="avisarClientePronto(${p.id})"><i class="fab fa-whatsapp"></i></button>
+            <button class="btn btn-info btn-sm" onclick="imprimirPedido(${p.id})"><i class="fas fa-print"></i></button>
+            ${_btnCancelBalcao}`;
+        } else if (p.status === "pronto_entrega") {
+          const _btnCancelPronto = _podeCancel
+            ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>`
+            : !temSolicitacaoCancelamento
+              ? `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i></button>`
+              : "";
+          cardAcoes = `<label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;color:#155724;font-weight:600;">
+              <input type="checkbox" class="check-pedido" value="${jsonSeguro}" style="width:18px;height:18px;"> Incluir na Rota
+            </label>
+            <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick="avisarClientePronto(${p.id})"><i class="fab fa-whatsapp"></i> Avisar</button>
+            <button class="btn btn-info btn-sm" onclick="imprimirPedido(${p.id})"><i class="fas fa-print"></i></button>
+            ${_btnCancelPronto}`;
+        }
+
+        const badgeCancelCard =
+          temSolicitacaoCancelamento && _podeCancel
+            ? `<div style="background:#fff0f0;border:1px solid #e74c3c;border-radius:6px;padding:6px 8px;font-size:0.75rem;color:#c0392b;margin-top:6px">
+                🚫 Cancel. solicitado: ${p.cancelamento_motivo || "-"}
+               </div>` : "";
+
+        cardsDiv.innerHTML += `
+          <div style="background:${cardBg}; border-radius:10px; padding:14px 16px; box-shadow:0 2px 8px rgba(0,0,0,0.07); border-left:4px solid ${p.status === "pendente" ? "#f59e0b" : p.status === "pronto_entrega" ? "#22c55e" : p.status === "saiu_entrega" ? "#3498db" : "#94a3b8"};">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">
+              <div>
+                <div style="font-weight:700;font-size:1rem">${p.uid_temporal || p.id} — ${p.cliente_nome || "Cliente"}</div>
+                <div style="font-size:0.78rem;color:#666;margin-top:2px">${p.endereco_entrega || (p.tipo_entrega === "balcao" ? "🏪 Mostrador" : "")}</div>
+              </div>
+              <span class="status-badge st-${p.status}" style="font-size:0.7rem">${statusLabel}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <div>
+                <strong style="font-size:1rem;color:var(--dark)">Gs ${totalSeguro.toLocaleString("es-PY")}</strong>
+                ${freteSeguro > 0 ? `<div style="font-size:0.72rem;color:#27ae60;margin-top:2px">🛵 Motoboy: Gs ${freteSeguro.toLocaleString("es-PY")}</div>` : ""}
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${cardAcoes}</div>
+            </div>
+            ${badgeCancelCard}
+          </div>`;
+      }
     });
   } else {
     tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; padding:20px; color:#999;">Ningún pedido activo.</td></tr>';
+    if (cardsDiv) cardsDiv.innerHTML = '<div style="text-align:center;padding:30px;color:#aaa;font-size:0.95rem">Ningún pedido activo por el momento.</div>';
   }
 
   _renderPaginacaoPedidos();
@@ -13355,7 +13429,10 @@ async function salvarPedidoBalcao() {
     obsPagPDV = JSON.stringify(partesPDV);
   }
 
+  // ── AQUI ESTÁ A CORREÇÃO: LENDO DO CAMPO OCULTO ──
   const fretePDV = tipoEntregaPDV === "delivery" ? parseInt(document.getElementById("balcao-frete")?.value || "0") || 0 : 0;
+  const freteMotoboyPDV = tipoEntregaPDV === "delivery" ? parseInt(document.getElementById("balcao-frete-motoboy")?.value || "0") || 0 : 0;
+
   const enderecoPDV = tipoEntregaPDV === "delivery" ? document.getElementById("balcao-endereco")?.value.trim() || "Delivery" : mesa ? `Mesa ${mesa}` : _soKg ? "Balcão - Venda Kg" : "Balcão";
   const _geoLat = document.getElementById("balcao-geo-lat")?.value || null;
   const _geoLng = document.getElementById("balcao-geo-lng")?.value || null;
@@ -13368,9 +13445,6 @@ async function salvarPedidoBalcao() {
   const totalNovo = subtotalLiquido + fretePDV + _taxaCartaoValorPDV + _taxaServicoValorPDV;
   const _agora = new Date().toISOString();
 
-  // 🔥 CORREÇÃO DO BLOQUEIO DE POP-UP 🔥
-  // Abre a janela de impressão imediatamente no clique para o navegador não bloquear.
-  // O 'about:blank' abre uma tela vazia que será preenchida depois.
   let printWindow = null;
   if (!window._mesaAbertaId) {
     printWindow = window.open("about:blank", `PrintPDV_${Date.now()}`, "width=400,height=600");
@@ -13380,7 +13454,8 @@ async function salvarPedidoBalcao() {
     status: _soKg ? "entregue" : _todosSemCozinha(carrinhoPDV) ? "pronto_entrega" : "em_preparo",
     tipo_entrega: tipoEntregaPDV,
     subtotal: subtotalBruto, desconto_pdv_valor: descontoAplicado, desconto_pdv_tipo: descontoAplicado > 0 ? descTipo : null,
-    frete_cobrado_cliente: fretePDV, total_geral: totalNovo,
+    frete_cobrado_cliente: fretePDV, frete_motoboy: freteMotoboyPDV, // <-- SALVANDO O VALOR CORRETO NO BANCO
+    total_geral: totalNovo,
     forma_pagamento: pagFinalPDV, taxa_cartao_percentual: _taxaCartaoValorPDV > 0 ? _taxaCartaoPctPDV : null, taxa_cartao_valor: _taxaCartaoValorPDV,
     taxa_servico_percentual: _taxaServicoValorPDV > 0 ? _taxaServicoPctPDV : null, taxa_servico_valor: _taxaServicoValorPDV,
     itens: novosItens, endereco_entrega: enderecoPDV, cliente_nome: nomeFinal, cliente_telefone: tel, obs_pagamento: obsPagPDV,
@@ -13393,7 +13468,7 @@ async function salvarPedidoBalcao() {
   const { data: novoPedido, error } = await supa.from("pedidos").insert([pedido]).select("id, uid_temporal").single();
   
   if (error) {
-    if (printWindow) printWindow.close(); // Fecha a tela em branco se der erro no banco
+    if (printWindow) printWindow.close();
     return alert("Error: " + error.message);
   }
 
@@ -13419,15 +13494,14 @@ async function salvarPedidoBalcao() {
     };
     
     const base64 = btoa(unescape(encodeURIComponent(JSON.stringify(dadosImpressao)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-    
-    // 🔥 REDIRECIONA A JANELA EM BRANCO PARA A IMPRESSÃO
     printWindow.location.href = `imprimir.html?d=${base64}`;
   }
 
   carrinhoPDV = [];
   const _set = (id, val = "") => { const el = document.getElementById(id); if (el) el.value = val; };
   _set("balcao-cliente"); _set("balcao-mesa"); _set("balcao-telefone");
-  _set("balcao-endereco"); _set("balcao-geo-lat"); _set("balcao-geo-lng"); _set("balcao-frete");
+  _set("balcao-endereco"); _set("balcao-geo-lat"); _set("balcao-geo-lng"); 
+  _set("balcao-frete"); _set("balcao-frete-motoboy"); // <-- LIMPANDO OS DOIS CAMPOS DE FRETE
   _set("balcao-gmaps-link"); _set("pdv-desconto-val");
   
   window._pdvTaxaCartaoValor = 0; window._pdvTaxaCartaoPct = 0; window._pdvTaxaServicoValor = 0; window._pdvTaxaServicoPct = 0;
@@ -16705,140 +16779,114 @@ async function calcularFretePDV() {
   const btn = document.getElementById("btn-gps-pdv");
   const msg = document.getElementById("frete-msg-pdv");
   const freteInput = document.getElementById("balcao-frete");
+  const freteMotoboyInput = document.getElementById("balcao-frete-motoboy");
 
   btn.disabled = true;
   btn.innerHTML = "⏳";
   msg.innerHTML = '<span style="color:#888">Localizando...</span>';
 
-  // ── Tenta extrair coordenadas: primeiro do campo Google Maps Link,
-  //    depois do campo endereço (retro-compatibilidade)
-  const gmapsLinkVal = (
-    document.getElementById("balcao-gmaps-link")?.value || ""
-  ).trim();
-  const endVal = (
-    document.getElementById("balcao-endereco")?.value || ""
-  ).trim();
+  const gmapsLinkVal = (document.getElementById("balcao-gmaps-link")?.value || "").trim();
+  const endVal = (document.getElementById("balcao-endereco")?.value || "").trim();
 
   let { lat, lng } = _extrairCoordsGmaps(gmapsLinkVal);
   if (lat === null) {
     const fromEnd = _extrairCoordsGmaps(endVal);
-    lat = fromEnd.lat;
-    lng = fromEnd.lng;
+    lat = fromEnd.lat; lng = fromEnd.lng;
   }
 
   if (lat === null || lng === null) {
     if (!navigator.geolocation) {
-      msg.innerHTML = '<span style="color:#e74c3c">Cole um link do Google Maps no campo acima ou use um celular com GPS</span>';
-      btn.disabled = false;
-      btn.innerHTML = "📍 Calcular";
-      return;
+      msg.innerHTML = '<span style="color:#e74c3c">Cole um link do Google Maps ou use um celular com GPS</span>';
+      btn.disabled = false; btn.innerHTML = "📍 Calcular"; return;
     }
     let position;
     try {
       position = await new Promise((resolve, reject) =>
-        navigator.geolocation.getCurrentPosition(resolve, reject, {
-          enableHighAccuracy: true,
-          timeout: 10000,
-        }),
+        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 10000 })
       );
     } catch {
-      msg.innerHTML = '<span style="color:#e74c3c">Cole um link do Google Maps no campo acima, ou permita o GPS</span>';
-      btn.disabled = false;
-      btn.innerHTML = "📍 Calcular";
-      return;
+      msg.innerHTML = '<span style="color:#e74c3c">Cole um link do Google Maps, ou permita o GPS</span>';
+      btn.disabled = false; btn.innerHTML = "📍 Calcular"; return;
     }
-    lat = position.coords.latitude;
-    lng = position.coords.longitude;
+    lat = position.coords.latitude; lng = position.coords.longitude;
   }
 
-  // ── Salva coords no campo oculto para usar no insert ─────────────────
   document.getElementById("balcao-geo-lat").value = lat;
   document.getElementById("balcao-geo-lng").value = lng;
 
-  msg.innerHTML = '<span style="color:#888">⏳ Calculando rota real...</span>';
+  msg.innerHTML = '<span style="color:#888">⏳ Calculando rota...</span>';
   
-  // ── TENTA CALCULAR A ROTA REAL PELA API OSRM ────────────────────────
   let dist = await obterDistanciaPelaRota(lat, lng);
   let usouRota = true;
   
-  // Se a API OSRM falhar (sem internet ou limite atingido), faz fallback para linha reta
   if (dist === null) {
-    const R = 6371,
-      toRad = (x) => (x * Math.PI) / 180;
+    const R = 6371, toRad = (x) => (x * Math.PI) / 180;
     const dLat = toRad(lat - COORD_LOJA.lat);
     const dLon = toRad(lng - COORD_LOJA.lng);
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos(toRad(COORD_LOJA.lat)) *
-        Math.cos(toRad(lat)) *
-        Math.sin(dLon / 2) ** 2;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(COORD_LOJA.lat)) * Math.cos(toRad(lat)) * Math.sin(dLon / 2) ** 2;
     dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     usouRota = false;
   }
 
+  // 🔥 MARGEM DE SEGURANÇA (Protege o motoboy) 🔥
+  // Adiciona 10% + 150 metros à distância calculada. 
+  // Isso evita que diferenças de GPS/Maps deixem o motoboy no prejuízo nas faixas.
+  const distOriginal = dist;
+  dist = (dist * 1.10) + 0.15; 
+  
   const nota = usouRota ? "🛣️ rota" : "📏 linha reta*";
+  const avisoMargem = ` <span style="font-size:0.65rem;color:#94a3b8;font-weight:normal">(c/ margem de segurança)</span>`;
 
   // ── VERIFICAÇÃO DE ZONAS ESPECIAIS ───────────────────────────────────
-  // Para as Zonas Especiais, o correto é usar o raio (linha reta) em relação ao centro.
-  // Exemplo: A loja fica no meio do centro. Se o cliente está a 1km em linha reta, 
-  // ele entra na zona, independentemente de a rua dar voltas.
   const zona = (_zonasEspeciaisCache || []).find((z) => {
-    const distZona = calcularDistancia(z.lat, z.lng, lat, lng); // Usa Haversine
-    return distZona <= z.raio_km;
+    const distZona = calcularDistancia(z.lat, z.lng, lat, lng);
+    return distZona <= Number(z.raio_km);
   });
 
   if (zona) {
     freteInput.value = zona.valor_cliente;
-    msg.innerHTML = `<span style="color:#27ae60">✅ ZONA ESPECIAL: ${zona.nome} (${dist.toFixed(1)}km ${nota}) → Gs ${zona.valor_cliente.toLocaleString("es-PY")}</span>`;
-    btn.disabled = false;
-    btn.innerHTML = "📍 Calcular";
+    freteMotoboyInput.value = zona.valor_motoboy;
+    msg.innerHTML = `<span style="color:#27ae60">✅ ZONA ESPECIAL: ${zona.nome} (${distOriginal.toFixed(1)}km) → Cliente: Gs ${zona.valor_cliente.toLocaleString("es-PY")}</span>`;
+    btn.disabled = false; btn.innerHTML = "📍 Calcular";
     atualizarCarrinhoPDV();
     return;
   }
 
-  // ── SE NÃO ESTIVER EM ZONA, SEGUE A TABELA NORMAL POR KM ─────────────
-  const LIMITES_KM = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-  ];
+  // ── TABELA NORMAL ────────────────────────────────────────────────────
+  const LIMITES_KM = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
   let freteIndex = -1;
   for (let i = 0; i < LIMITES_KM.length; i++) {
-    if (dist <= LIMITES_KM[i]) {
-      freteIndex = i;
-      break;
-    }
+    if (dist <= LIMITES_KM[i]) { freteIndex = i; break; }
   }
 
-  if (
-    freteIndex === -1 ||
-    (TABELA_FRETE_ADMIN && TABELA_FRETE_ADMIN[freteIndex]?.acombinar)
-  ) {
-    msg.innerHTML = `<span style="color:#e67e22">⚠️ ${dist.toFixed(1)}km (${nota}) — combinar frete</span>`;
+  if (freteIndex === -1 || (TABELA_FRETE_ADMIN && TABELA_FRETE_ADMIN[freteIndex]?.acombinar)) {
+    msg.innerHTML = `<span style="color:#e67e22">⚠️ ${dist.toFixed(1)}km (${nota}) — combinar frete ${avisoMargem}</span>`;
     freteInput.value = "";
-    btn.disabled = false;
-    btn.innerHTML = "📍 Calcular";
+    freteMotoboyInput.value = "0";
+    btn.disabled = false; btn.innerHTML = "📍 Calcular";
     atualizarCarrinhoPDV();
     return;
   }
 
   let frete = 0;
+  let freteMotoboy = 0;
+
   if (TABELA_FRETE_ADMIN?.[freteIndex]) {
     frete = TABELA_FRETE_ADMIN[freteIndex].loja || 0;
+    freteMotoboy = TABELA_FRETE_ADMIN[freteIndex].motoboy || 0;
   } else {
-    if (dist <= 3.3) frete = 6000;
-    else if (dist <= 4.2) frete = 12000;
-    else if (dist <= 5.2) frete = 18000;
-    else if (dist <= 6.2) frete = 24000;
-    else frete = 24000 + Math.ceil(dist - 6.2) * 3000;
+    if (dist <= 3.3) { frete = 6000; freteMotoboy = 6000; }
+    else if (dist <= 4.2) { frete = 12000; freteMotoboy = 12000; }
+    else if (dist <= 5.2) { frete = 18000; freteMotoboy = 18000; }
+    else if (dist <= 6.2) { frete = 24000; freteMotoboy = 24000; }
+    else { frete = 24000 + Math.ceil(dist - 6.2) * 3000; freteMotoboy = frete; }
   }
 
   freteInput.value = frete;
-  const aviso = usouRota ? "" : ' <em style="color:#e67e22">(estimativa por falha na rota)</em>';
-  
-  // O motoboy e o operador agora vão ver claramente se foi calculado por rota ou linha reta.
-  msg.innerHTML = `<span style="color:#27ae60">✅ ${dist.toFixed(1)}km ${nota} → Gs ${frete.toLocaleString("es-PY")}</span>${aviso}`;
-  
-  btn.disabled = false;
-  btn.innerHTML = "📍 Calcular";
+  freteMotoboyInput.value = freteMotoboy;
+  const aviso = usouRota ? "" : ' <em style="color:#e67e22">(estimativa)</em>';
+  msg.innerHTML = `<span style="color:#27ae60">✅ ${dist.toFixed(1)}km ${nota} → Gs ${frete.toLocaleString("es-PY")}${aviso}${avisoMargem}</span>`;
+  btn.disabled = false; btn.innerHTML = "📍 Calcular";
   atualizarCarrinhoPDV();
 }
 
@@ -17331,6 +17379,7 @@ async function verificarContratoAdmin(session) {
       .select("id")
       .eq("usuario_id", session.user.id)
       .eq("aceito", true)
+      .limit(1)
       .maybeSingle();
 
     if (!data) {
@@ -17458,20 +17507,22 @@ async function admAceitarContrato() {
       ip = (await r.json()).ip || "";
     } catch (_) {}
 
-    const { error } = await supa.from("contratos_aceites").insert([
-      {
-        usuario_id: session.user.id,
-        aceito: true,
-        nome_assinante: nome,
-        doc_assinante: doc,
-        ip_assinante: ip,
-        user_agent: navigator.userAgent,
-        aceito_em: new Date().toISOString(),
-      },
-    ]);
+    // CORREÇÃO: Adicionamos o campo 'email' que é obrigatório no banco
+    const payload = {
+      usuario_id: session.user.id,
+      email: session.user.email, 
+      aceito: true,
+      nome_assinante: nome,
+      doc_assinante: doc,
+      ip_assinante: ip,
+      user_agent: navigator.userAgent,
+      aceito_em: new Date().toISOString(),
+    };
+
+    const { error } = await supa.from("contratos_aceites").insert([payload]);
 
     if (error) {
-      // Pode já existir — tenta update
+      // Se já existir um contrato para este usuário, atualiza ao invés de falhar
       if (error.code === "23505" || error.message?.includes("duplicate")) {
         await supa
           .from("contratos_aceites")
@@ -17489,9 +17540,9 @@ async function admAceitarContrato() {
 
     const overlay = document.getElementById("contrato-admin-overlay");
     if (overlay) overlay.style.display = "none";
-    console.log("✅ Contrato aceptado con éxito.");
+    console.log("✅ Contrato aceito com sucesso.");
   } catch (e) {
-    alert("Error al registrar firma: " + e.message);
+    alert("Erro ao registrar firma: " + e.message);
     if (btn) {
       btn.disabled = false;
       btn.textContent = "✍️ ASSINAR E CONTINUAR";
